@@ -2,148 +2,102 @@ package main
 
 import (
 	"fmt"
-	"sort"
+	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-func ExecutePipeline(freeFlowJobs ...job) {
+func ExecutePipeline(jobs ...job) {
 	out := make(chan interface{})
 	wg := &sync.WaitGroup{}
-	for _, inputJob := range freeFlowJobs {
+	for _, function := range jobs {
 		in := out
 		out = make(chan interface{})
 		wg.Add(1)
-		go func(pipeline job, in, out chan interface{}) {
+		go func(fn job, in, out chan interface{}) {
 			defer wg.Done()
-			pipeline(in, out)
+			fn(in, out)
 			close(out)
-		}(inputJob, in, out)
+		}(function, in, out)
 	}
 	wg.Wait()
 }
 
 func SingleHash(in, out chan interface{}) {
-	globalWG := &sync.WaitGroup{}
 	md5chan := make(chan struct{}, 1)
-	for input := range in {
-		//now := time.Now()
-		//fmt.Println(input)
-		data := strconv.Itoa(input.(int))
-		globalWG.Add(1)
-		go func() {
-			defer globalWG.Done()
+	wgg := &sync.WaitGroup{}
+	for inp := range in {
+		//fmt.Println(inp, "SingleHash data", inp)
+		strInp := strconv.Itoa(inp.(int))
+		wgg.Add(1)
+		go func(strInput string) {
+			defer wgg.Done()
 			wg := &sync.WaitGroup{}
-
-			crc32data := ""
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				crc32data = DataSignerCrc32(data)
-			}()
-
-			md5data := ""
-			crc32md5data := ""
+			hashCrc32 := ""
 
 			wg.Add(1)
-			go func(ch chan struct{}) {
-				md5chan <- struct{}{}
+			go func(input string) {
 				defer wg.Done()
-				md5data = DataSignerMd5(data)
-				<-md5chan
-				crc32md5data = DataSignerCrc32(md5data)
-				//fmt.Println(md5data, crc32md5data)
-			}(md5chan)
-
+				hashCrc32 = DataSignerCrc32(input)
+				//fmt.Println(input, "SingleHash", "crc32(data)", hashCrc32)
+			}(strInput)
+			hashMd5 := ""
+			md5chan <- struct{}{}
+			hashMd5 = DataSignerMd5(strInput)
+			<-md5chan
+			//fmt.Println(strInput, "SingleHash", "md5(data)", hashMd5)
+			hashCrc32Md5 := DataSignerCrc32(hashMd5)
+			//fmt.Println(strInput, "SingleHash", "crc32(md5(data))", hashMd5)
 			wg.Wait()
-			result := fmt.Sprintf("%s~%s", crc32data, crc32md5data)
-			//fmt.Println(time.Now().Format(time.TimeOnly), "SingleHash: ", input, time.Since(now))
-			out <- result
-		}()
+			out <- hashCrc32 + "~" + hashCrc32Md5
+		}(strInp)
 	}
-	globalWG.Wait()
+	wgg.Wait()
 }
 
 func MultiHash(in, out chan interface{}) {
 	wg := &sync.WaitGroup{}
-	for input := range in {
-		data := input.(string)
-		res := ""
-		crc32data := &sync.Map{}
+	for inp := range in {
+		strInput := inp.(string)
 		wg.Add(1)
-		go func() {
+		go func(input string) {
 			defer wg.Done()
-			wg := &sync.WaitGroup{}
+			m := &sync.Map{}
+			wgLoop := &sync.WaitGroup{}
 			for i := 0; i < 6; i++ {
-				wg.Add(1)
-				go func(th int) {
-					defer wg.Done()
-					thData := fmt.Sprintf("%s%s", strconv.Itoa(th), data)
-					crc32data.Store(th, DataSignerCrc32(thData))
-				}(i)
-			}
-			wg.Wait()
+				wgLoop.Add(1)
+				go func(i int, strInput string) {
+					defer wgLoop.Done()
+					hashCrc32 := DataSignerCrc32(strconv.Itoa(i) + strInput)
+					m.Store(i, hashCrc32)
 
-			//fmt.Println(crc32data)
+				}(i, strInput)
+			}
+			wgLoop.Wait()
+			res := ""
 			for i := 0; i < 6; i++ {
-				v, ok := crc32data.Load(i)
+				str, ok := m.Load(i)
 				if !ok {
-					fmt.Println("error loading ", i)
-					return
+					fmt.Println(i)
+					log.Fatal(ok)
 				}
-				res += v.(string)
+				res += str.(string)
 			}
 			out <- res
-		}()
+		}(strInput)
 	}
 	wg.Wait()
 }
 
-//func MultiHash(in, out chan interface{}) {
-//	for input := range in {
-//		now := time.Now()
-//		data := input.(string)
-//		res := ""
-//		crc32data := &sync.Map{}
-//		wg := &sync.WaitGroup{}
-//		wg.Add(1)
-//		go func() {
-//			defer wg.Done()
-//			for i := 0; i < 6; i++ {
-//				wg.Add(1)
-//				go func(th int) {
-//					defer wg.Done()
-//					thData := fmt.Sprintf("%s%s", strconv.Itoa(th), data)
-//					crc32data.Store(th, DataSignerCrc32(thData))
-//				}(i)
-//				//fmt.Printf("%s crc32(th+step1)) %v %s\n", prefix, i, crc32data)
-//			}
-//		}()
-//		wg.Wait()
-//		for i := 0; i < 6; i++ {
-//			v, ok := crc32data.Load(i)
-//			if !ok {
-//				fmt.Println(1)
-//				return
-//			}
-//			res += v.(string)
-//		}
-//		fmt.Println("1231231")
-//		//fmt.Printf("%s result: %s\n\n", prefix, res)
-//		out <- res
-//		fmt.Printf("MultiHash %v, %s \n\n", input, time.Since(now))
-//	}
-//}
-
 func CombineResults(in, out chan interface{}) {
+
 	res := make([]string, 0)
-	for input := range in {
-		res = append(res, input.(string))
+	for inp := range in {
+		res = append(res, inp.(string))
 	}
 
-	sort.Strings(res)
-
+	slices.Sort(res)
 	out <- strings.Join(res, "_")
 }
